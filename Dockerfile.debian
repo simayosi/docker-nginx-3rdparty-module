@@ -1,0 +1,61 @@
+# ARG variables
+## Tag for the Nginx image
+ARG NGINX_IMAGE_TAG=mainline-bookworm
+## Module name: e.g. "echo"
+ARG MODULE_NAME
+## Module source URL: e.g. "https://github.com/openresty/echo-nginx-module/archive/v0.63.tar.gz"
+ARG MODULE_SOURCE
+
+# Build stage
+FROM nginx:${NGINX_IMAGE_TAG} AS build
+
+ARG MODULE_NAME
+ARG MODULE_SOURCE
+ARG BUILD_DEPS=""
+
+## Set shell options for better error handling
+SHELL ["/bin/bash", "-exo", "pipefail", "-c"]
+
+## Install build dependencies
+RUN apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        debhelper \
+        devscripts \
+        git \
+        libpcre2-dev \
+        libpcre3-dev \
+        libssl-dev \
+        libxml2-utils \
+        lsb-release \
+        quilt \
+        unzip \
+        wget \
+        xsltproc \
+        zlib1g-dev \
+        $BUILD_DEPS \
+    ; \
+    rm -rf /var/lib/apt/lists/*
+
+## Download build_module.sh
+ADD https://raw.githubusercontent.com/simayosi/pkg-oss/fa0e48d33cd989e7f3308001dd01f30764534fb5/build_module.sh \
+    /usr/src/build_module.sh
+
+## Build the module
+WORKDIR /usr/src
+RUN NGINX_VERSION=$(nginx -v 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+'); \
+    MODULE_NAME_OPTS=${MODULE_NAME:+"-n $MODULE_NAME"}; \
+    /bin/sh build_module.sh $MODULE_NAME_OPTS -y -f -v $NGINX_VERSION \
+        -o /tmp/packages $MODULE_SOURCE
+
+# Production stage
+FROM nginx:${NGINX_IMAGE_TAG}
+
+ARG MODULE_NAME
+
+## Install the module
+RUN --mount=type=bind,target=/tmp/packages/,source=/tmp/packages/,from=build \
+    NGINX_VERSION=$(nginx -v 2>&1 | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+'); \
+    MODULE_NAME=${MODULE_NAME:-"*"}; \
+    apt-get install -y \
+        /tmp/packages/nginx-module-${MODULE_NAME}_${NGINX_VERSION}+*.deb
