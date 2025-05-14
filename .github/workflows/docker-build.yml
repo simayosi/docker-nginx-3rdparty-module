@@ -1,0 +1,84 @@
+name: Build NGINX with 3rd-party Modules
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build ${{ matrix.version }}-${{ matrix.distro.name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        version: [mainline, stable, default]
+        distro:
+          - name: alpine
+            build_deps: "krb5-dev"
+            variant: "alpine"
+          - name: debian
+            build_deps: "libkrb5-dev"
+            variant: "bookworm"
+    env:
+      MODULE_NAME: spnego-http-auth
+      MODULE_SOURCE: https://github.com/stnoonan/spnego-http-auth-nginx-module/archive/refs/tags/v1.1.3.tar.gz
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: ${{ runner.os }}-buildx-${{ matrix.distro.name }}-${{ matrix.version }}-${{ hashFiles('Dockerfile.${{ matrix.base }}') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-buildx-${{ matrix.distro.name }}-${{ matrix.version }}-${{ hashFiles('Dockerfile.${{ matrix.base }}') }}-
+            ${{ runner.os }}-buildx-${{ matrix.distro.name }}-${{ matrix.version }}-
+            ${{ runner.os }}-buildx-${{ matrix.distro.name }}-
+            ${{ runner.os }}-buildx-
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.${{ matrix.distro.name }}
+          build-args: |
+            MODULE_NAME=${{ env.MODULE_NAME }}
+            MODULE_SOURCE=${{ env.MODULE_SOURCE }}
+            BUILD_DEPS=${{ matrix.distro.build_deps }}
+            ${{ matrix.version != 'default' && format('NGINX_IMAGE_TAG={0}-{1}', matrix.version, matrix.distro.variant) || '' }}
+          tags: ${{ env.MODULE_NAME }}-nginx:${{ matrix.distro.name }}-${{ matrix.version }}
+          load: true
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Move cache
+        run: |
+          if [ -d /tmp/.buildx-cache-new ]; then
+            rm -rf /tmp/.buildx-cache
+            mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          fi
+
+      - name: Verify image works
+        run: |
+          image_tag="$MODULE_NAME-nginx:${{ matrix.distro.name }}-${{ matrix.version }}"
+          if ! docker run --rm $image_tag nginx -t; then
+            echo "::error::Image validation failed!"
+            exit 1
+          fi
+          echo "Image validation successful"
+
+      - name: Clean up dangling Docker images
+        run: |
+          docker image prune -f
